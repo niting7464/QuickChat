@@ -12,10 +12,13 @@ import {
   uploadFilesToCloudinary,
 } from "../utils/features.js";
 import { ErrorHandler } from "../utils/utility.js";
+import { sendEmail } from "../utils/email.js";
+import crypto from "crypto";
+
 
 // Create a new user and save it to the database and save token in cookie
 const newUser = TryCatch(async (req, res, next) => {
-  const { name, username, password, bio } = req.body;
+  const { name, username, password, bio, email } = req.body;
 
   const file = req.file;
 
@@ -28,16 +31,19 @@ const newUser = TryCatch(async (req, res, next) => {
     url: result[0].url,
   };
 
+
   const user = await User.create({
     name,
     bio,
     username,
     password,
+    email,
     avatar,
   });
 
   sendToken(res, user, 201, "User created");
 });
+
 
 // Login user and save token in cookie
 const login = TryCatch(async (req, res, next) => {
@@ -53,6 +59,74 @@ const login = TryCatch(async (req, res, next) => {
     return next(new ErrorHandler("Invalid Username or Password", 404));
 
   sendToken(res, user, 200, `Welcome Back, ${user.name}`);
+});
+
+// Forgot password
+const forgotPassword = TryCatch(async (req, res, next) => {
+  const { email } = req.body;
+
+  const user = await User.findOne({ email });
+
+  if (!user) return next(new ErrorHandler("User not found", 404));
+
+  const resetToken = crypto.randomBytes(20).toString("hex");
+  user.resetPasswordToken = crypto
+    .createHash("sha256")
+    .update(resetToken)
+    .digest("hex");
+  user.resetPasswordExpires = Date.now() + 15 * 60 * 1000; // 15 minutes
+
+  await user.save();
+
+  const resetUrl = `${req.protocol}://${req.get(
+    "host"
+  )}/password/reset/${resetToken}`;
+
+  const message = `You have requested a password reset. Please make a put request to: \n\n ${resetUrl}`;
+
+  try {
+    await sendEmail({
+      email: user.email,
+      subject: "Password Reset Request",
+      message,
+    });
+
+    res.status(200).json({
+      success: true,
+      message: `Email sent to ${user.email}`,
+    });
+  } catch (error) {
+    user.resetPasswordToken = undefined;
+    user.resetPasswordExpires = undefined;
+
+    await user.save();
+
+    return next(new ErrorHandler("Email could not be sent", 500));
+  }
+});
+
+// Reset password
+const resetPassword = TryCatch(async (req, res, next) => {
+  const resetPasswordToken = crypto
+    .createHash("sha256")
+    .update(req.params.token)
+    .digest("hex");
+
+  const user = await User.findOne({
+    resetPasswordToken,
+    resetPasswordExpires: { $gt: Date.now() },
+  });
+
+  if (!user)
+    return next(new ErrorHandler("Invalid token or token has expired", 400));
+
+  user.password = await hash(req.body.password, 10);
+  user.resetPasswordToken = undefined;
+  user.resetPasswordExpires = undefined;
+
+  await user.save();
+
+  sendToken(res, user, 200, "Password reset successfully");
 });
 
 const getMyProfile = TryCatch(async (req, res, next) => {
@@ -239,4 +313,6 @@ export {
   newUser,
   searchUser,
   sendFriendRequest,
+  forgotPassword,
+  resetPassword,
 };
